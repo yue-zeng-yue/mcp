@@ -157,3 +157,5 @@ jobs:
               "$SIF_NAME.build-info.txt" \
               --title "Polar ARM64 SIF: getmoto__moto-7365" \
               --notes "Native aarch64 Apptainer sandbox for the Polar/SWE-Gym smoke task. Built from Moto commit 7f6c9cb1deafb280fe7fcc7551c38e397f11a706 and validated with the task test patch and gold patch."
+          fi
+
