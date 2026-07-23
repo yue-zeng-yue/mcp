@@ -1,0 +1,159 @@
+name: Build Polar ARM64 SIF
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build-arm64-sif.yml"
+      - "sif-build/**"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 300
+    env:
+      INSTANCE_ID: getmoto__moto-7365
+      SIF_NAME: getmoto__moto-7365.sif
+      RELEASE_TAG: getmoto-moto-7365-arm64
+
+    steps:
+      - name: Check out build inputs
+        uses: actions/checkout@v4
+
+      - name: Confirm native ARM64 runner
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(uname -m)" = "aarch64"
+          df -h /
+
+      - name: Reclaim runner disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet
+          sudo apt-get clean
+          df -h /
+
+      - name: Install Apptainer
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y software-properties-common
+          sudo add-apt-repository -y ppa:apptainer/ppa
+          sudo apt-get update
+          sudo apt-get install -y apptainer
+          apptainer version
+
+      - name: Build native ARM64 SIF
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/apptainer-cache" "$RUNNER_TEMP/apptainer-tmp"
+          sudo env \
+            APPTAINER_CACHEDIR="$RUNNER_TEMP/apptainer-cache" \
+            APPTAINER_TMPDIR="$RUNNER_TEMP/apptainer-tmp" \
+            apptainer build "$SIF_NAME" "sif-build/$INSTANCE_ID.def"
+          sudo chown "$USER:$USER" "$SIF_NAME"
+          test -s "$SIF_NAME"
+          apptainer inspect "$SIF_NAME"
+          apptainer exec "$SIF_NAME" bash -lc \
+            'test "$(uname -m)" = aarch64; cat /etc/polar-sandbox-release; python --version'
+
+      - name: Validate the task before and after the gold patch
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/testbed"
+          apptainer exec "$SIF_NAME" \
+            tar -C /testbed -cf - . \
+            | tar -C "$RUNNER_TEMP/testbed" -xf -
+          chmod -R u+rwX "$RUNNER_TEMP/testbed"
+          git -C "$RUNNER_TEMP/testbed" config --local user.name "Polar SIF Builder"
+          git -C "$RUNNER_TEMP/testbed" config --local user.email "builder@example.invalid"
+          git -C "$RUNNER_TEMP/testbed" reset --hard \
+            7f6c9cb1deafb280fe7fcc7551c38e397f11a706
+          git -C "$RUNNER_TEMP/testbed" apply \
+            "$GITHUB_WORKSPACE/sif-build/$INSTANCE_ID-test.patch"
+
+          set +e
+          apptainer exec \
+            --bind "$RUNNER_TEMP/testbed:/testbed" \
+            --pwd /testbed \
+            "$SIF_NAME" \
+            python -m pytest -q \
+              tests/test_dynamodb/test_dynamodb_update_expressions.py::test_update_item_add_float \
+            2>&1 | tee "$RUNNER_TEMP/before-gold.log"
+          before_rc=${PIPESTATUS[0]}
+          set -e
+          test "$before_rc" -eq 1
+          grep -q "FAILED.*test_update_item_add_float" "$RUNNER_TEMP/before-gold.log"
+
+          git -C "$RUNNER_TEMP/testbed" apply \
+            "$GITHUB_WORKSPACE/sif-build/$INSTANCE_ID-gold.patch"
+          apptainer exec \
+            --bind "$RUNNER_TEMP/testbed:/testbed" \
+            --pwd /testbed \
+            "$SIF_NAME" \
+            python -m pytest -q \
+              tests/test_dynamodb/test_dynamodb_update_expressions.py::test_update_item_add_float \
+              tests/test_dynamodb/test_dynamodb_update_expressions.py::test_update_different_map_elements_in_single_request
+
+      - name: Validate Apptainer instance lifecycle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          apptainer instance start "$SIF_NAME" polar-smoke
+          apptainer exec instance://polar-smoke \
+            bash -lc 'test "$(uname -m)" = aarch64; test -d /testbed; python --version'
+          apptainer instance stop polar-smoke
+
+      - name: Create checksum and build report
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sha256sum "$SIF_NAME" | tee "$SIF_NAME.sha256"
+          {
+            echo "instance_id=$INSTANCE_ID"
+            echo "architecture=$(uname -m)"
+            echo "base_commit=7f6c9cb1deafb280fe7fcc7551c38e397f11a706"
+            echo "runner=$RUNNER_NAME"
+            echo "apptainer=$(apptainer version)"
+            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            stat --printf='size_bytes=%s\n' "$SIF_NAME"
+          } | tee "$SIF_NAME.build-info.txt"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: getmoto__moto-7365-arm64-sif
+          path: |
+            getmoto__moto-7365.sif
+            getmoto__moto-7365.sif.sha256
+            getmoto__moto-7365.sif.build-info.txt
+          compression-level: 0
+          retention-days: 7
+
+      - name: Publish a directly downloadable release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" \
+              "$SIF_NAME" \
+              "$SIF_NAME.sha256" \
+              "$SIF_NAME.build-info.txt" \
+              --clobber
+          else
+            gh release create "$RELEASE_TAG" \
+              "$SIF_NAME" \
+              "$SIF_NAME.sha256" \
+              "$SIF_NAME.build-info.txt" \
+              --title "Polar ARM64 SIF: getmoto__moto-7365" \
+              --notes "Native aarch64 Apptainer sandbox for the Polar/SWE-Gym smoke task. Built from Moto commit 7f6c9cb1deafb280fe7fcc7551c38e397f11a706 and validated with the task test patch and gold patch."
