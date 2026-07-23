@@ -1,0 +1,41 @@
+name: Report ARM64 SIF build status
+
+on:
+  workflow_run:
+    workflows: ["Build Polar ARM64 SIF"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write build status
+        shell: bash
+        env:
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          UPDATED_AT: ${{ github.event.workflow_run.updated_at }}
+        run: |
+          set -euxo pipefail
+          {
+            echo "# ARM64 SIF build status"
+            echo
+            echo "- conclusion: $CONCLUSION"
+            echo "- run_id: $RUN_ID"
+            echo "- run_number: $RUN_NUMBER"
+            echo "- head_sha: $HEAD_SHA"
+            echo "- updated_at: $UPDATED_AT"
+            echo "- run_url: $RUN_URL"
+          } > STATUS.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add STATUS.md
+          git commit -m "Report ARM64 SIF build $CONCLUSION" || exit 0
+          git push
